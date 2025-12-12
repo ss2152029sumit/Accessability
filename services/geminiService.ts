@@ -37,7 +37,52 @@ Keep it under 30 words.`
     return text;
 
   } catch (error) {
-    console.error("Gemini API Error:", error);
+    console.error("Gemini Vision Error:", error);
+    throw error;
+  }
+};
+
+export const askNavigation = async (query: string, userLocation?: { lat: number; lng: number }) => {
+  try {
+    // We use gemini-2.5-flash for Maps as it is optimized for tools and low latency
+    const model = 'gemini-2.5-flash';
+    
+    const config: any = {
+      tools: [{ googleMaps: {} }],
+      systemInstruction: "You are a helpful guide. When asked about locations, routes, or places, provide clear, descriptive directions suitable for someone visually impaired. If Google Maps data is available, summarize the key details (distance, rating, address)."
+    };
+
+    // Add location context if available
+    if (userLocation) {
+      config.toolConfig = {
+        googleMapsToolConfig: {
+            mode: "MODE_Dynamic" // Optional, but good practice if available, otherwise defaults work
+        },
+        retrievalConfig: {
+          latLng: {
+            latitude: userLocation.lat,
+            longitude: userLocation.lng
+          }
+        }
+      };
+    }
+
+    const response = await ai.models.generateContent({
+      model,
+      contents: query,
+      config
+    });
+
+    // Extract grounding chunks (Maps links/sources)
+    const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+    
+    return {
+      text: response.text || "I couldn't find that location.",
+      chunks: chunks
+    };
+
+  } catch (error) {
+    console.error("Gemini Navigation Error:", error);
     throw error;
   }
 };

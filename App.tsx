@@ -5,7 +5,8 @@ import VideoFeed, { VideoFeedHandle } from './components/VideoFeed';
 import DetectionPanel from './components/DetectionPanel';
 import Controls from './components/Controls';
 import InfoSection from './components/InfoSection';
-import { analyzeImage } from './services/geminiService';
+import NavigationSection from './components/NavigationSection';
+import { analyzeImage, askNavigation } from './services/geminiService';
 import { speakText, cancelSpeech } from './services/ttsService';
 import { playSound, triggerHaptic } from './services/audioUtils';
 
@@ -19,20 +20,41 @@ const App: React.FC = () => {
   const [successCount, setSuccessCount] = useState(0);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
+  // Navigation State
+  const [navProcessing, setNavProcessing] = useState(false);
+  const [navResult, setNavResult] = useState<{ text: string; chunks: any[] } | null>(null);
+  const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | undefined>(undefined);
+  
   const videoFeedRef = useRef<VideoFeedHandle>(null);
   const isDetectingRef = useRef(isDetecting);
   const isAudioEnabledRef = useRef(isAudioEnabled);
-  const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   
   // Track the timestamp of the latest request to prevent race conditions
   const lastRequestTimestampRef = useRef<number>(0);
+
+  // Initial Geolocation Fetch
+  useEffect(() => {
+    if ("geolocation" in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          setUserLocation({
+            lat: position.coords.latitude,
+            lng: position.coords.longitude
+          });
+        },
+        (error) => {
+          console.warn("Geolocation access denied or failed", error);
+        }
+      );
+    }
+  }, []);
 
   useEffect(() => {
     isDetectingRef.current = isDetecting;
     if (!isDetecting) {
         if (timeoutRef.current) clearTimeout(timeoutRef.current);
     } else {
-        // Start the loop
         scheduleNextFrame(0);
     }
   }, [isDetecting]);
@@ -89,12 +111,33 @@ const App: React.FC = () => {
     setTimeout(() => setErrorMsg(null), 5000);
   }, []);
 
+  const handleNavigationSearch = async (query: string) => {
+    setNavProcessing(true);
+    // Pause detection speech if active to avoid talking over
+    if (isAudioEnabledRef.current) cancelSpeech();
+    
+    playSound('start'); // Feedback sound
+
+    try {
+      const result = await askNavigation(query, userLocation);
+      setNavResult(result);
+      
+      if (isAudioEnabledRef.current) {
+        speakText(result.text);
+      }
+      triggerHaptic('success');
+    } catch (err) {
+      handleError("Navigation request failed");
+      console.error(err);
+    } finally {
+      setNavProcessing(false);
+    }
+  };
+
   const processFrame = async () => {
     if (!isDetectingRef.current || !videoFeedRef.current) return;
 
     setFrameCount(prev => prev + 1);
-    
-    // Mark this request's start time
     const currentRequestTime = Date.now();
     lastRequestTimestampRef.current = currentRequestTime;
 
@@ -108,14 +151,11 @@ const App: React.FC = () => {
 
       const resultText = await analyzeImage(base64Image);
       
-      // CRITICAL: Only update state if this is still the LATEST request
       if (isDetectingRef.current && lastRequestTimestampRef.current === currentRequestTime) {
-        
         setDescription(resultText);
         setSuccessCount(prev => prev + 1);
         setStatus('analyzing');
 
-        // --- Accessibility Features ---
         const textLower = resultText.toLowerCase();
         const isHazard = textLower.includes('hazard') || 
                          textLower.includes('danger') ||
@@ -130,11 +170,12 @@ const App: React.FC = () => {
           playSound('success');
         }
 
-        if (isAudioEnabledRef.current) {
+        // Only speak hazard/vision updates if NOT currently processing a navigation query result
+        // or if detection is strictly prioritized. We'll prioritize vision for safety.
+        if (isAudioEnabledRef.current && !navProcessing) {
           speakText(resultText);
         }
         
-        // Success? Wait 3s before next scan to save quota and give time to read
         scheduleNextFrame(3000);
       }
 
@@ -143,16 +184,13 @@ const App: React.FC = () => {
           console.error("Analysis failed", error);
           if (isDetectingRef.current) {
                const errorText = error?.message || '';
-               
                if (errorText.includes('429')) {
                  console.warn("Rate limit hit. Cooling down...");
                  setStatus('error');
                  setDescription("⚠️ Quota limit. Cooling down for 10s...");
                  if (isAudioEnabledRef.current) speakText("Quota limit. Waiting.");
-                 // Wait 10 seconds before retrying if rate limited
                  scheduleNextFrame(10000);
                } else {
-                 // Other errors, retry in 3s
                  scheduleNextFrame(3000);
                }
            }
@@ -224,6 +262,12 @@ const App: React.FC = () => {
       <DetectionPanel 
         content={description}
         lastUpdated={isDetecting ? `Scan ${successCount}` : 'Ready'}
+      />
+
+      <NavigationSection 
+        onSearch={handleNavigationSearch}
+        isProcessing={navProcessing}
+        result={navResult}
       />
 
       <Controls 
