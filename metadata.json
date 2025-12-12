@@ -1,0 +1,7 @@
+{
+  "name": "Accessibility Narrator",
+  "description": "Real-Time Vision AI Accessibility Assistant powered by Gemini",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
